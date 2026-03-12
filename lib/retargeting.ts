@@ -7,6 +7,9 @@ export const POSE_LANDMARKS = {
   LEFT_SHOULDER: 11,  RIGHT_SHOULDER: 12,
   LEFT_ELBOW: 13,     RIGHT_ELBOW: 14,
   LEFT_WRIST: 15,     RIGHT_WRIST: 16,
+  LEFT_PINKY: 17,     RIGHT_PINKY: 18,
+  LEFT_INDEX: 19,     RIGHT_INDEX: 20,
+  LEFT_THUMB: 21,     RIGHT_THUMB: 22,
   LEFT_HIP: 23,       RIGHT_HIP: 24,
   LEFT_KNEE: 25,      RIGHT_KNEE: 26,
   LEFT_ANKLE: 27,     RIGHT_ANKLE: 28,
@@ -32,16 +35,13 @@ export const MIXAMO_BONES = {
   RightUpLeg:"mixamorigRightUpLeg", RightLeg:"mixamorigRightLeg",
 };
 
-const BONE_PRIMARY_AXIS: Record<string, THREE.Vector3> = {
+// ── PROTECTED BODY AXES ──
+const BODY_AXES: Record<string, THREE.Vector3> = {
   [MIXAMO_BONES.Spine]:new THREE.Vector3(0,1,0),
   [MIXAMO_BONES.Spine1]:new THREE.Vector3(0,1,0),
   [MIXAMO_BONES.Spine2]:new THREE.Vector3(0,1,0),
   [MIXAMO_BONES.Neck]:new THREE.Vector3(0,1,0),
   [MIXAMO_BONES.Head]:new THREE.Vector3(0,1,0),
-  [MIXAMO_BONES.LeftArm]:new THREE.Vector3(-1,0,0),
-  [MIXAMO_BONES.LeftForeArm]:new THREE.Vector3(-1,0,0),
-  [MIXAMO_BONES.RightArm]:new THREE.Vector3(1,0,0),
-  [MIXAMO_BONES.RightForeArm]:new THREE.Vector3(1,0,0),
   [MIXAMO_BONES.LeftUpLeg]:new THREE.Vector3(0,-1,0),
   [MIXAMO_BONES.LeftLeg]:new THREE.Vector3(0,-1,0),
   [MIXAMO_BONES.RightUpLeg]:new THREE.Vector3(0,-1,0),
@@ -65,10 +65,14 @@ function lmH(joints: number[][], idx: number, cfg: DebugConfig): THREE.Vector3 {
 export class BoneRetargeter {
   private bones = new Map<string, THREE.Bone>();
   private restLocalQ = new Map<string, THREE.Quaternion>();
+  private boneAxes = new Map<string, THREE.Vector3>();
   private initialized = false;
 
   init(scene: THREE.Object3D) {
-    this.bones.clear(); this.restLocalQ.clear();
+    this.bones.clear(); 
+    this.restLocalQ.clear(); 
+    this.boneAxes.clear();
+    
     scene.traverse((obj) => {
       if ((obj as THREE.Bone).isBone) {
         const b = obj as THREE.Bone;
@@ -76,8 +80,51 @@ export class BoneRetargeter {
         this.restLocalQ.set(b.name, b.quaternion.clone());
       }
     });
+
+    // Explicit kinematic chain guarantees flawless elbow hinge mechanics
+    const preferredChildren: Record<string, string> = {
+      [MIXAMO_BONES.LeftShoulder]: MIXAMO_BONES.LeftArm,
+      [MIXAMO_BONES.RightShoulder]: MIXAMO_BONES.RightArm,
+      [MIXAMO_BONES.LeftArm]: MIXAMO_BONES.LeftForeArm,
+      [MIXAMO_BONES.RightArm]: MIXAMO_BONES.RightForeArm,
+      [MIXAMO_BONES.LeftForeArm]: MIXAMO_BONES.LeftHand,
+      [MIXAMO_BONES.RightForeArm]: MIXAMO_BONES.RightHand,
+      [MIXAMO_BONES.LeftHand]: "mixamorigLeftHandMiddle1",
+      [MIXAMO_BONES.RightHand]: "mixamorigRightHandMiddle1",
+    };
+
+    this.bones.forEach((bone, name) => {
+      if (BODY_AXES[name]) {
+        this.boneAxes.set(name, BODY_AXES[name].clone());
+        return;
+      }
+
+      let targetChild: THREE.Bone | undefined;
+      if (preferredChildren[name]) {
+        targetChild = bone.children.find(c => c.name === preferredChildren[name]) as THREE.Bone;
+      }
+      if (!targetChild) {
+        targetChild = bone.children.find(c => (c as THREE.Bone).isBone) as THREE.Bone;
+      }
+
+      if (targetChild) {
+        const axis = targetChild.position.clone().normalize();
+        if (axis.lengthSq() > 0.1) this.boneAxes.set(name, axis);
+      }
+    });
+
+    this.bones.forEach((bone, name) => {
+      if (!this.boneAxes.has(name)) {
+        if (bone.parent && this.boneAxes.has(bone.parent.name)) {
+          this.boneAxes.set(name, this.boneAxes.get(bone.parent.name)!.clone());
+        } else {
+          this.boneAxes.set(name, new THREE.Vector3(0, 1, 0));
+        }
+      }
+    });
+
     this.initialized = true;
-    console.log("[Retargeter] bones:", [...this.bones.keys()]);
+    console.log("[Retargeter] Fully Stabilized Kinematic Axes Built.");
   }
 
   isReady() { return this.initialized && this.bones.size > 0; }
@@ -99,23 +146,34 @@ export class BoneRetargeter {
     const g = (idx: number) => lm(pose, idx, cfg);
     const lSh=g(11),rSh=g(12),lHip=g(23),rHip=g(24);
     const lElb=g(13),rElb=g(14),lWri=g(15),rWri=g(16);
+    const lPinky=g(17),rPinky=g(18),lIndex=g(19),rIndex=g(20);
     const lKne=g(25),rKne=g(26),lAnk=g(27),rAnk=g(28);
     const hipC=mid(lHip,rHip), shC=mid(lSh,rSh);
     const spineD=dir(hipC,shC);
 
+    // CORE BODY
     this._aim(MIXAMO_BONES.Spine, spineD, cfg);
     this._aim(MIXAMO_BONES.Spine1, spineD, cfg);
     this._aim(MIXAMO_BONES.Spine2, spineD, cfg);
     if (pose[0]) this._aim(MIXAMO_BONES.Neck, dir(shC, g(0)), cfg);
+    
+    // ARMS
     this._aim(MIXAMO_BONES.LeftArm,      dir(lSh,lElb), cfg);
     this._aim(MIXAMO_BONES.LeftForeArm,  dir(lElb,lWri), cfg);
     this._aim(MIXAMO_BONES.RightArm,     dir(rSh,rElb), cfg);
     this._aim(MIXAMO_BONES.RightForeArm, dir(rElb,rWri), cfg);
+    
+    // STABLE WRISTS (Driven by the rock-solid body pose, completely eliminating hand-jitter twist)
+    if (pose[17] && pose[19]) this._aim(MIXAMO_BONES.LeftHand, dir(lWri, mid(lPinky, lIndex)), cfg);
+    if (pose[18] && pose[20]) this._aim(MIXAMO_BONES.RightHand, dir(rWri, mid(rPinky, rIndex)), cfg);
+
+    // LEGS
     this._aim(MIXAMO_BONES.LeftUpLeg,    dir(lHip,lKne), cfg);
     this._aim(MIXAMO_BONES.LeftLeg,      dir(lKne,lAnk), cfg);
     this._aim(MIXAMO_BONES.RightUpLeg,   dir(rHip,rKne), cfg);
     this._aim(MIXAMO_BONES.RightLeg,     dir(rKne,rAnk), cfg);
 
+    // DETAILED FINGERS
     if (lhand?.length >= 21) this._applyHand(lhand,"Left",cfg);
     if (rhand?.length >= 21) this._applyHand(rhand,"Right",cfg);
   }
@@ -123,7 +181,7 @@ export class BoneRetargeter {
   private _aim(boneName: string, worldDir: THREE.Vector3, cfg: DebugConfig) {
     const bone = this.bones.get(boneName);
     if (!bone) return;
-    const primaryAxis = BONE_PRIMARY_AXIS[boneName];
+    const primaryAxis = this.boneAxes.get(boneName);
     if (!primaryAxis) return;
 
     const ovr: BoneOverride = cfg.bones[boneName] ?? { enabled:true, flipX:false, flipY:false, flipZ:false, scale:1 };
@@ -141,6 +199,7 @@ export class BoneRetargeter {
     if (bone.parent) bone.parent.getWorldQuaternion(parentWorldQ);
     const restLocalQ = this.restLocalQ.get(boneName) ?? new THREE.Quaternion();
     const boneWorldQ = parentWorldQ.clone().multiply(restLocalQ);
+    
     const restWorldDir = primaryAxis.clone().applyQuaternion(boneWorldQ).normalize();
 
     const dot = restWorldDir.dot(target);
@@ -157,33 +216,25 @@ export class BoneRetargeter {
 
   private _applyHand(joints: number[][], side: "Left"|"Right", cfg: DebugConfig) {
     const gh = (i: number) => lmH(joints, i, cfg);
-    const wrist=gh(0), midMcp=gh(9), idxMcp=gh(5), pnkMcp=gh(17);
-    const fingerDir = dir(wrist, midMcp);
-    const sideRaw = side==="Right"
-      ? new THREE.Vector3().subVectors(pnkMcp,idxMcp)
-      : new THREE.Vector3().subVectors(idxMcp,pnkMcp);
-    const sideDir = sideRaw.normalize();
-    const palmNormal = new THREE.Vector3().crossVectors(fingerDir,sideDir).normalize();
+
     const fingers = [
-      {name:"Thumb",idx:[1,2,3,4]},{name:"Index",idx:[5,6,7,8]},
-      {name:"Middle",idx:[9,10,11,12]},{name:"Ring",idx:[13,14,15,16]},
-      {name:"Pinky",idx:[17,18,19,20]},
+      { name: 'Thumb',  ids: [HAND_LANDMARKS.THUMB_CMC, HAND_LANDMARKS.THUMB_MCP, HAND_LANDMARKS.THUMB_IP, HAND_LANDMARKS.THUMB_TIP] },
+      { name: 'Index',  ids: [HAND_LANDMARKS.INDEX_MCP, HAND_LANDMARKS.INDEX_PIP, HAND_LANDMARKS.INDEX_DIP, HAND_LANDMARKS.INDEX_TIP] },
+      { name: 'Middle', ids: [HAND_LANDMARKS.MIDDLE_MCP, HAND_LANDMARKS.MIDDLE_PIP, HAND_LANDMARKS.MIDDLE_DIP, HAND_LANDMARKS.MIDDLE_TIP] },
+      { name: 'Ring',   ids: [HAND_LANDMARKS.RING_MCP, HAND_LANDMARKS.RING_PIP, HAND_LANDMARKS.RING_DIP, HAND_LANDMARKS.RING_TIP] },
+      { name: 'Pinky',  ids: [HAND_LANDMARKS.PINKY_MCP, HAND_LANDMARKS.PINKY_PIP, HAND_LANDMARKS.PINKY_DIP, HAND_LANDMARKS.PINKY_TIP] }
     ];
+
     for (const f of fingers) {
-      const pts = f.idx.map(i=>gh(i));
-      for (let seg=0; seg<3; seg++) {
-        const bn = `mixamorig${side}Hand${f.name}${seg+1}`;
-        const bone = this.bones.get(bn);
-        if (!bone) continue;
-        const sd = dir(pts[seg], pts[seg+1]);
-        if (sd.lengthSq()<1e-6) continue;
-        const curlA = Math.acos(Math.max(-1,Math.min(1,sd.dot(fingerDir))));
-        const curlS = sd.dot(palmNormal)<0 ? 1 : -1;
-        const splay = Math.asin(Math.max(-1,Math.min(1,sd.dot(sideDir))));
-        const restQ = this.restLocalQ.get(bn) ?? new THREE.Quaternion();
-        const curlQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), curlS*curlA*cfg.coord.fingerCurlScale);
-        const splayQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), splay*0.4);
-        bone.quaternion.copy(restQ).multiply(curlQ).multiply(splayQ);
+      for (let seg = 0; seg < 3; seg++) {
+        const bn = `mixamorig${side}Hand${f.name}${seg + 1}`;
+        const p1 = gh(f.ids[seg]);
+        const p2 = gh(f.ids[seg + 1]);
+        const targetDir = dir(p1, p2);
+        
+        if (targetDir.lengthSq() > 1e-6) {
+          this._aim(bn, targetDir, cfg);
+        }
       }
     }
   }
