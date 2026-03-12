@@ -81,7 +81,6 @@ export class BoneRetargeter {
       }
     });
 
-    // Explicit kinematic chain guarantees flawless elbow hinge mechanics
     const preferredChildren: Record<string, string> = {
       [MIXAMO_BONES.LeftShoulder]: MIXAMO_BONES.LeftArm,
       [MIXAMO_BONES.RightShoulder]: MIXAMO_BONES.RightArm,
@@ -124,7 +123,6 @@ export class BoneRetargeter {
     });
 
     this.initialized = true;
-    console.log("[Retargeter] Fully Stabilized Kinematic Axes Built.");
   }
 
   isReady() { return this.initialized && this.bones.size > 0; }
@@ -149,13 +147,23 @@ export class BoneRetargeter {
     const lPinky=g(17),rPinky=g(18),lIndex=g(19),rIndex=g(20);
     const lKne=g(25),rKne=g(26),lAnk=g(27),rAnk=g(28);
     const hipC=mid(lHip,rHip), shC=mid(lSh,rSh);
+    
+    // ── FIX FOR FORWARD LEAN ──
+    // We dampen the Z-axis of the spine/neck to prevent the avatar from bowing forward
     const spineD=dir(hipC,shC);
+    spineD.z *= 0.2; // Reduce forward lean by 80%
+    spineD.normalize();
 
-    // CORE BODY
     this._aim(MIXAMO_BONES.Spine, spineD, cfg);
     this._aim(MIXAMO_BONES.Spine1, spineD, cfg);
     this._aim(MIXAMO_BONES.Spine2, spineD, cfg);
-    if (pose[0]) this._aim(MIXAMO_BONES.Neck, dir(shC, g(0)), cfg);
+    
+    if (pose[0]) {
+      const neckD = dir(shC, g(0));
+      neckD.z *= 0.2; // Reduce neck forward lean by 80%
+      neckD.normalize();
+      this._aim(MIXAMO_BONES.Neck, neckD, cfg);
+    }
     
     // ARMS
     this._aim(MIXAMO_BONES.LeftArm,      dir(lSh,lElb), cfg);
@@ -163,7 +171,8 @@ export class BoneRetargeter {
     this._aim(MIXAMO_BONES.RightArm,     dir(rSh,rElb), cfg);
     this._aim(MIXAMO_BONES.RightForeArm, dir(rElb,rWri), cfg);
     
-    // STABLE WRISTS (Driven by the rock-solid body pose, completely eliminating hand-jitter twist)
+    // ── FIX FOR 90-DEGREE WRISTS ──
+    // Driven exclusively by the stable body pose to preserve true wrist rotation
     if (pose[17] && pose[19]) this._aim(MIXAMO_BONES.LeftHand, dir(lWri, mid(lPinky, lIndex)), cfg);
     if (pose[18] && pose[20]) this._aim(MIXAMO_BONES.RightHand, dir(rWri, mid(rPinky, rIndex)), cfg);
 
@@ -216,6 +225,16 @@ export class BoneRetargeter {
 
   private _applyHand(joints: number[][], side: "Left"|"Right", cfg: DebugConfig) {
     const gh = (i: number) => lmH(joints, i, cfg);
+    const wrist = gh(HAND_LANDMARKS.WRIST);
+    const indexMcp = gh(HAND_LANDMARKS.INDEX_MCP);
+    const pinkyMcp = gh(HAND_LANDMARKS.PINKY_MCP);
+
+    // Palm Normal constraint ensures fingers don't bend backwards
+    const palmNormal = new THREE.Vector3().crossVectors(
+      dir(wrist, indexMcp), 
+      dir(indexMcp, pinkyMcp)
+    ).normalize();
+    if (side === 'Left') palmNormal.negate();
 
     const fingers = [
       { name: 'Thumb',  ids: [HAND_LANDMARKS.THUMB_CMC, HAND_LANDMARKS.THUMB_MCP, HAND_LANDMARKS.THUMB_IP, HAND_LANDMARKS.THUMB_TIP] },
@@ -226,15 +245,38 @@ export class BoneRetargeter {
     ];
 
     for (const f of fingers) {
+      let prevDir = dir(wrist, gh(f.ids[0]));
+      
       for (let seg = 0; seg < 3; seg++) {
         const bn = `mixamorig${side}Hand${f.name}${seg + 1}`;
-        const p1 = gh(f.ids[seg]);
-        const p2 = gh(f.ids[seg + 1]);
-        const targetDir = dir(p1, p2);
+        const bone = this.bones.get(bn);
+        const restQ = this.restLocalQ.get(bn);
+        if (!bone || !restQ) continue;
+
+        const currentDir = dir(gh(f.ids[seg]), gh(f.ids[seg + 1]));
+        if (currentDir.lengthSq() < 1e-6) continue;
+
+        // ── JITTER FIX: Pure 1D Hinge ──
+        // ALL segments are now locked to a strict 1D local curl. No sideways twitching allowed.
+        const dot = Math.max(-1, Math.min(1, prevDir.dot(currentDir)));
+        let angle = Math.acos(dot);
         
-        if (targetDir.lengthSq() > 1e-6) {
-          this._aim(bn, targetDir, cfg);
-        }
+        // ── NOISE GATE ──
+        // Completely ignore tiny micro-twitches (less than ~4.5 degrees)
+        if (angle < 0.08) angle = 0;
+
+        // Check if it's curling inward towards the palm
+        const bendCross = new THREE.Vector3().crossVectors(prevDir, currentDir);
+        if (bendCross.dot(palmNormal) < 0) angle *= -1; // Force inward bend
+
+        // Mixamo specific: Thumb rolls on local Y, fingers on local Z
+        const axis = f.name === 'Thumb' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+        if (f.name === 'Thumb' && side === 'Left') angle *= -1; // Mirror fix
+
+        const curlQ = new THREE.Quaternion().setFromAxisAngle(axis, angle * cfg.coord.fingerCurlScale);
+        bone.quaternion.copy(restQ).multiply(curlQ);
+        
+        prevDir = currentDir;
       }
     }
   }
