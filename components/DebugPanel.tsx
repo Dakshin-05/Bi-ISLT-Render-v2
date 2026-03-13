@@ -3,7 +3,7 @@ import React, { useCallback, useState } from "react";
 import {
   DebugConfig, BoneOverride, DRIVEN_BONES, BONE_LABELS,
   defaultDebugConfig, defaultBoneOverride, AxisSigns,
-} from "../types";
+} from "../types/";
 
 // ── Style helpers ─────────────────────────────────────────────────────────────
 const mono: React.CSSProperties = { fontFamily:"'JetBrains Mono','Courier New',monospace" };
@@ -190,7 +190,7 @@ export function DebugPanel({ config:cfg, onChange, liveStats }: DebugPanelProps)
   return (
     <div style={{
       background:"rgba(6,12,28,0.97)", borderLeft:"1px solid rgba(50,90,170,0.2)",
-      display:"flex", flexDirection:"column", height:"100%", overflow:"hidden",
+      display:"flex", flexDirection:"column", height:"100%", overflow:"hidden", minHeight:0,
     }}>
       {/* Header */}
       <div style={{
@@ -198,6 +198,7 @@ export function DebugPanel({ config:cfg, onChange, liveStats }: DebugPanelProps)
         display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0,
         fontSize:10, letterSpacing:"0.2em", color:"#3a6aaa", textTransform:"uppercase", ...mono,
       }}>
+        <style>{`[data-debug-scroll]::-webkit-scrollbar{width:4px}[data-debug-scroll]::-webkit-scrollbar-track{background:rgba(10,20,50,0.3)}[data-debug-scroll]::-webkit-scrollbar-thumb{background:rgba(60,100,180,0.4);border-radius:2px}`}</style>
         <span>⚙ Retargeting Debug</span>
         <button onClick={resetAll} style={{
           fontSize:8, padding:"2px 8px", cursor:"pointer", letterSpacing:"0.1em", ...mono,
@@ -206,7 +207,7 @@ export function DebugPanel({ config:cfg, onChange, liveStats }: DebugPanelProps)
         }}>RESET ALL</button>
       </div>
 
-      <div style={{ flex:1, overflowY:"auto", padding:"10px 12px",
+      <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", minHeight:0, padding:"10px 12px", scrollbarWidth:"thin" as "thin",
         display:"flex", flexDirection:"column", gap:10 }}>
 
         {/* ── Live stats ── */}
